@@ -7,6 +7,7 @@ from huggingface_hub import hf_hub_download
 from imwatermark import WatermarkEncoder
 from PIL import ExifTags, Image
 from safetensors.torch import load_file as load_sft
+from accelerate import init_empty_weights
 
 from flux.model import Flux, FluxLoraWrapper, FluxParams
 from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
@@ -328,34 +329,63 @@ def load_flow_model(
     ):
         ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
 
-    with torch.device("meta" if ckpt_path is not None else device):
+    # Determine target device
+    target_device = torch.device(device)
+
+    # Initialize model structure with empty weights (on 'meta' device)
+    print(f"Initializing model structure with empty weights (target device: {target_device})")
+    with init_empty_weights():
         if lora_path is not None:
-            model = FluxLoraWrapper(params=configs[name].params).to(torch.bfloat16)
+            model = FluxLoraWrapper(params=configs[name].params)
         else:
-            model = Flux(configs[name].params).to(torch.bfloat16)
+            model = Flux(configs[name].params)
 
     if ckpt_path is not None:
-        print("Loading checkpoint")
-        # load_sft doesn't support torch.device
-        sd = load_sft(ckpt_path, device=str(device))
-        sd = optionally_expand_state_dict(model, sd)
-        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
-        if verbose:
-            print_load_warning(missing, unexpected)
+        print(f"Loading checkpoint state dict from '{ckpt_path}' to CPU...")
+        # Load state dict to CPU first
+        sd = load_sft(ckpt_path, device="cpu")
+        # Optional: Expand state dict keys if needed (should still be on CPU)
+        # sd = optionally_expand_state_dict(model, sd) # Might not be needed if shapes match
 
-    if configs[name].lora_path is not None:
-        print("Loading LoRA")
-        lora_sd = load_sft(configs[name].lora_path, device=str(device))
-        # loading the lora params + overwriting scale values in the norms
-        missing, unexpected = model.load_state_dict(lora_sd, strict=False, assign=True)
+        print(f"Materializing model on {target_device} and assigning state dict...")
+        # Move model structure to target device using to_empty and set dtype
+        model.to_empty(device=target_device)
+        model.to(torch.bfloat16)
+        # Load state dict using assign=True to load weights in-place from CPU sd to GPU model
+        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+
+        # Clean up CPU state dict memory
+        del sd
+        torch.cuda.empty_cache()
+
         if verbose:
             print_load_warning(missing, unexpected)
+        print("Checkpoint loaded.")
+    else:
+        # If no checkpoint, materialize the empty model on the target device
+        print("Warning: Initializing model without checkpoint weights.")
+        model = model.to(target_device).to(torch.bfloat16)
+
+    # Loading LoRA weights if provided (load to CPU first)
+    if lora_path is not None:
+        print("Loading LoRA weights...")
+        lora_sd = load_sft(lora_path, device="cpu")
+        # Manually load LoRA state dict onto the model (already on GPU)
+        missing_lora, unexpected_lora = model.load_state_dict(lora_sd, strict=False, assign=True)
+        del lora_sd
+        torch.cuda.empty_cache()
+        if verbose:
+            print_load_warning(missing_lora, unexpected_lora)
+        print("LoRA loaded.")
+
     return model
 
 
-def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
+def load_t5(model_name: str, device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    return HFEmbedder("google/t5-v1_1-xxl", max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+    t5_model_id = "google/t5-v1_1-xl" if "schnell" in model_name else "google/t5-v1_1-xxl"
+    print(f"Loading T5 model: {t5_model_id}")
+    return HFEmbedder(t5_model_id, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
 
 
 def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
@@ -445,3 +475,27 @@ WATERMARK_MESSAGE = 0b001010101111111010000111100111001111010100101110
 # bin(x)[2:] gives bits of x as str, use int to convert them to 0/1
 WATERMARK_BITS = [int(bit) for bit in bin(WATERMARK_MESSAGE)[2:]]
 embed_watermark = WatermarkEmbedder(WATERMARK_BITS)
+
+
+# A fixed 48-bit message that was chosen at random
+WATERMARK_MESSAGE = 0b001010101111111010000111100111001111010100101110
+# bin(x)[2:] gives bits of x as str, use int to convert them to 0/1
+WATERMARK_BITS = [int(bit) for bit in bin(WATERMARK_MESSAGE)[2:]]
+embed_watermark = WatermarkEmbedder(WATERMARK_BITS)
+
+
+
+# A fixed 48-bit message that was chosen at random
+WATERMARK_MESSAGE = 0b001010101111111010000111100111001111010100101110
+# bin(x)[2:] gives bits of x as str, use int to convert them to 0/1
+WATERMARK_BITS = [int(bit) for bit in bin(WATERMARK_MESSAGE)[2:]]
+embed_watermark = WatermarkEmbedder(WATERMARK_BITS)
+
+
+
+# A fixed 48-bit message that was chosen at random
+WATERMARK_MESSAGE = 0b001010101111111010000111100111001111010100101110
+# bin(x)[2:] gives bits of x as str, use int to convert them to 0/1
+WATERMARK_BITS = [int(bit) for bit in bin(WATERMARK_MESSAGE)[2:]]
+embed_watermark = WatermarkEmbedder(WATERMARK_BITS)
+
